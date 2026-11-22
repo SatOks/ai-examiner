@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.groq_key
+.streamlit/secrets.toml
+data/results/
+simulations/
+simulations_strong_ok.json
+sim_log*.txt
+streamlit_log.txt
