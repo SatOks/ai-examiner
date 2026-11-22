@@ -147,3 +147,41 @@ def test_rate_limit_fallback_and_wait(tmp_path, monkeypatch):
     assert events == [{"type": "assistant", "content": "Назвіть email, будь ласка."}]
     assert agent.client.models_tried == models + models[:2]
     assert len(waits) == 1 and agent.usage[-1]["model"] == models[1]
+
+
+def test_imperative_question_with_next_topic(tmp_path):
+    """Нова тема + «Поясніть…» без знака питання + ще один get_next_topic: хід закінчується на запитанні."""
+    agent = make_agent(tmp_path, [
+        reply(None, call("start_exam", email="demo@lpnu.ua", name="Демо Студент")),
+        reply(None, call("get_next_topic")),
+        reply("Поясніть, як працює self-attention.", call("get_next_topic")),
+    ])
+    events = agent.respond("Демо Студент, demo@lpnu.ua")
+    assert events[-1]["content"] == "Поясніть, як працює self-attention."
+    assert len(agent.exam.remaining) == len(agent.exam.topics) - 1
+
+
+def test_cannot_skip_topic_without_question(tmp_path):
+    agent = make_agent(tmp_path, [
+        reply(None, call("start_exam", email="demo@lpnu.ua", name="Демо Студент")),
+        reply(None, call("get_next_topic")),
+        reply(None, call("get_next_topic")),
+        reply("Перше запитання (чекаю відповіді)"),
+    ])
+    events = agent.respond("Демо Студент, demo@lpnu.ua")
+    assert "ще не обговорено" in events[2]["result"]["error"]
+    assert events[-1]["content"] == "Перше запитання"
+    assert len(agent.exam.remaining) == len(agent.exam.topics) - 1
+
+
+@pytest.mark.parametrize("raw, clean", [
+    ("Які підходи застосовують?Опишіть, будь ласка, регуляризацію.", "Які підходи застосовують?"),
+    ("Різниця у прикладах?..................Чи можете описати negative sampling?", "Різниця у прикладах?"),
+    ("Відповідь прийнято.Тема: BERT. Що таке [CLS]?", "Відповідь прийнято.Тема: BERT. Що таке [CLS]?"),
+    ("Що таке TF‑IDF?**Тема**: інше", "Що таке TF‑IDF?"),
+    ("Перше запитання? (чекаю відповіді)", "Перше запитання?"),
+    ("Тема: BERT.\nЩо таке [CLS]? Наприклад, у 2.5 версії.", "Тема: BERT.\nЩо таке [CLS]? Наприклад, у 2.5 версії."),
+])
+def test_clean_reply(raw, clean):
+    from agent import clean_reply
+    assert clean_reply(raw) == clean

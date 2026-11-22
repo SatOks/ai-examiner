@@ -1,6 +1,7 @@
 """LLM-агент-екзаменатор: цикл «модель → виклик інструмента → результат → модель» на Groq API."""
 
 import json
+import re
 import time
 
 from groq import APIConnectionError, APIStatusError, AuthenticationError, Groq, RateLimitError
@@ -17,6 +18,9 @@ MODELS = {
 MAX_STEPS = 8            # максимум викликів моделі на одну репліку студента
 MAX_ANSWER_CHARS = 3000
 ADVANCING_TOOLS = {"get_next_topic", "end_exam"}   # інструменти, що ведуть іспит далі
+# gpt-oss на Groq інколи віддає два повідомлення, зшиті без пробілу: «…підходи?Опишіть, будь ласка…»
+GLUED = re.compile(r"(?<=[?!.…])\.*(?=[*«]*[А-ЯІЇЄҐA-Z])")
+WAITING_NOTE = re.compile(r"\s*\((?:чекаю|буду чекати|очікую)[^)]*\)", re.IGNORECASE)   # «(чекаю відповіді)»
 MAX_WAIT = 60          # скільки секунд за один виклик можна чекати на ліміт Groq
 
 GREETING = (
@@ -77,6 +81,15 @@ TOOLS = [
 ]
 
 
+def clean_reply(text: str) -> str:
+    """Прибирає «(чекаю відповіді)» і другу половину зшитої репліки (одне запитання за раз)."""
+    text = WAITING_NOTE.sub("", text).strip()
+    glued = GLUED.search(text)
+    if glued and "?" in text[:glued.start()]:   # обрізаємо, лише якщо запитання вже поставлено
+        return text[:glued.start()].strip()
+    return text
+
+
 def _retry_after(error: RateLimitError) -> float:
     """Скільки секунд чекати за заголовком retry-after (з невеликим запасом)."""
     try:
@@ -102,6 +115,7 @@ class ExaminerAgent:
         # history для end_exam: role "system" = репліки екзаменатора, "user" = студент, "tool_call" = інструменти
         self.history = [message("system", GREETING)]
         self.usage: list[dict] = []
+        self.topic_unasked = False   # тему видано, але студент ще не бачив жодного запитання з неї
 
     def respond(self, text: str) -> list[dict]:
         """Обробляє репліку студента. Повертає події для інтерфейсу:
@@ -125,7 +139,7 @@ class ExaminerAgent:
     def _loop(self, events: list) -> list[dict]:
         for _ in range(MAX_STEPS):
             reply = self._complete()
-            content = (reply.content or "").strip()
+            content = clean_reply(reply.content or "")
             if not reply.tool_calls:
                 if not content:
                     content = "Вибачте, не розчув. Повторіть, будь ласка, відповідь."
@@ -133,9 +147,10 @@ class ExaminerAgent:
                 self._say(content, events)
                 return events
 
-            if "?" in content and any(c.function.name in ADVANCING_TOOLS for c in reply.tool_calls):
-                # Модель поставила запитання і водночас іде далі (нова тема чи кінець іспиту).
-                # Лишаємо запитання, виклики відкидаємо: спершу студент має відповісти.
+            advancing = any(c.function.name in ADVANCING_TOOLS for c in reply.tool_calls)
+            if advancing and content and ("?" in content or self.topic_unasked):
+                # Модель поставила запитання (або щойно отримала тему і пише про неї) і водночас іде далі.
+                # Лишаємо текст, виклики відкидаємо: спершу студент має відповісти.
                 self.messages.append({"role": "assistant", "content": content})
                 self._say(content, events)
                 return events
@@ -216,8 +231,12 @@ class ExaminerAgent:
         exam = self.exam
         if name == "start_exam":
             return {"topics": exam.start_exam(email=str(args.get("email", "")), name=str(args.get("name", "")))}
+        if name in ADVANCING_TOOLS and self.topic_unasked:
+            raise ExamError(f"Тему «{exam.current}» ще не обговорено: спершу поставте з неї запитання "
+                            "студенту і дочекайтеся відповіді.")
         if name == "get_next_topic":
             topic = exam.get_next_topic()
+            self.topic_unasked = bool(topic)
             if topic:   # ключові пункти одразу з темою: на один виклик моделі менше
                 return {"topic": topic, "key_points": exam.get_topic_rubric(topic)}
             return {"topic": "", "note": "Теми закінчились. Виставте оцінку і викличте end_exam."}
@@ -236,5 +255,6 @@ class ExaminerAgent:
         raise ExamError(f"Невідомий інструмент {name}.")
 
     def _say(self, content: str, events: list) -> None:
+        self.topic_unasked = False
         self.history.append(message("system", content))
         events.append({"type": "assistant", "content": content})
