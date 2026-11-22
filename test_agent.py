@@ -188,3 +188,22 @@ def test_cannot_skip_topic_without_question(tmp_path):
 def test_clean_reply(raw, clean):
     from agent import clean_reply
     assert clean_reply(raw) == clean
+
+
+def test_daily_limit_message(tmp_path, monkeypatch):
+    import httpx
+    from groq import RateLimitError
+    import agent as agent_module
+    from agent import AgentError
+    monkeypatch.setattr(agent_module.time, "sleep", lambda s: None)
+
+    def create(**kwargs):
+        response = httpx.Response(429, headers={"retry-after": "300"},
+                                  request=httpx.Request("POST", "https://api.groq.com"))
+        raise RateLimitError("Rate limit reached on tokens per day (TPD)", response=response, body=None)
+
+    agent = ExaminerAgent("test-key", exam=Exam(results_dir=tmp_path, seed=0))
+    agent.client = NS(chat=NS(completions=NS(create=create)))
+    with pytest.raises(AgentError, match="добовий ліміт"):
+        agent.respond("Демо Студент")
+    assert agent.messages[-1]["role"] == "assistant"   # репліку відкочено, можна надіслати ще раз
