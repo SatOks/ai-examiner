@@ -24,6 +24,15 @@ def test_wrong_name(exam):
         exam.start_exam(EMAIL, "Олена Петренко")
 
 
+def test_name_with_greeting(exam):
+    assert exam.start_exam(EMAIL, "Добрий день! Олена Коваль")
+
+
+def test_only_first_name_is_not_enough(exam):
+    with pytest.raises(ExamError, match="знову викличте start_exam"):
+        exam.start_exam(EMAIL, "Олена")
+
+
 def test_name_order_and_case(exam):
     topics = exam.start_exam(" Olena.Koval@LPNU.ua ", "коваль олена")
     assert 2 <= len(topics) <= 3

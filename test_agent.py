@@ -64,6 +64,7 @@ def test_full_exam(tmp_path):
     assert exam.finished and exam.result["score"] == 6.5
     shown = [e["content"] for e in events if e["type"] == "assistant"]
     assert shown == ["Непогано. Оцінка 6.5", "До побачення!"]
+    assert next(e for e in events if e.get("final"))["score"] == 6.5
     history = exam.result["history"]
     assert {m["role"] for m in history} == {"system", "user", "tool_call"}
     assert history[-2] == {**history[-2], "role": "system", "content": "Непогано. Оцінка 6.5"}
@@ -177,7 +178,9 @@ def test_cannot_skip_topic_without_question(tmp_path):
 @pytest.mark.parametrize("raw, clean", [
     ("Які підходи застосовують?Опишіть, будь ласка, регуляризацію.", "Які підходи застосовують?"),
     ("Різниця у прикладах?..................Чи можете описати negative sampling?", "Різниця у прикладах?"),
-    ("Відповідь прийнято.Тема: BERT. Що таке [CLS]?", "Відповідь прийнято.Тема: BERT. Що таке [CLS]?"),
+    ("Відповідь прийнято.Тема: BERT. Що таке [CLS]?", "Відповідь прийнято. Тема: BERT. Що таке [CLS]?"),
+    ("Тема: **LLM**.\nОпишіть greedy і beam search.Опишіть greedy і beam search.",
+     "Тема: **LLM**.\nОпишіть greedy і beam search."),
     ("Що таке TF‑IDF?**Тема**: інше", "Що таке TF‑IDF?"),
     ("Перше запитання? (чекаю відповіді)", "Перше запитання?"),
     ("Тема: BERT.\nЩо таке [CLS]? Наприклад, у 2.5 версії.", "Тема: BERT.\nЩо таке [CLS]? Наприклад, у 2.5 версії."),

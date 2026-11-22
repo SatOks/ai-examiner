@@ -1,6 +1,7 @@
 """LLM-агент-екзаменатор: цикл «модель → виклик інструмента → результат → модель» на Groq API."""
 
 import json
+import os
 import re
 import time
 
@@ -15,6 +16,7 @@ MODELS = {
     "qwen/qwen3.8-27b": {"reasoning_effort": "default"},
     "openai/gpt-oss-20b": {"reasoning_effort": "medium"},
 }
+LOG_PATH = os.environ.get("EXAMINER_LOG")   # необов'язковий журнал відповідей моделей
 MAX_STEPS = 8            # максимум викликів моделі на одну репліку студента
 MAX_ANSWER_CHARS = 3000
 ADVANCING_TOOLS = {"get_next_topic", "end_exam"}   # інструменти, що ведуть іспит далі
@@ -33,7 +35,7 @@ GREETING = (
 SYSTEM_PROMPT = """Ти екзаменатор з курсу «Основи великих мовних моделей» (NLP) у Львівській політехніці. Ти проводиш усний іспит у чаті. Пиши українською, коротко, як живий викладач. Без таблиць і заголовків.
 
 Хід іспиту:
-1. Дізнайся в студента ім'я, прізвище та email. Коли маєш усе, виклич start_exam. Якщо функція повернула помилку, поясни студенту, що не так, і попроси перевірити дані. Без успішного start_exam іспит не починай.
+1. Дізнайся в студента ім'я, прізвище та email. Коли маєш усе, виклич start_exam, передавши лише ім'я та прізвище (без привітань). Ім'я й email перевіряє сама функція, не ти. Якщо вона повернула помилку, поясни студенту, що не так, і попроси перевірити дані; щойно студент їх напише, знову виклич start_exam. Без успішного start_exam іспит не починай.
 2. Виклич get_next_topic. Він повертає тему і ключові пункти повної відповіді (key_points). Пункти потрібні тобі для запитань і оцінки, студенту їх не показуй. Назви тему і постав одне запитання.
 3. По темі веди діалог: одне запитання за раз, уточнюй, проси приклад або пояснення, якщо відповідь неповна. На тему не більше 3–4 запитань. Переходь до наступної теми (get_next_topic), коли:
    - відповідь достатньо повна;
@@ -82,12 +84,18 @@ TOOLS = [
 
 
 def clean_reply(text: str) -> str:
-    """Прибирає «(чекаю відповіді)» і другу половину зшитої репліки (одне запитання за раз)."""
+    """Прибирає «(чекаю відповіді)» і зшиті докупи повтори та другі запитання (одне запитання за раз)."""
     text = WAITING_NOTE.sub("", text).strip()
-    glued = GLUED.search(text)
-    if glued and "?" in text[:glued.start()]:   # обрізаємо, лише якщо запитання вже поставлено
-        return text[:glued.start()].strip()
-    return text
+    cuts = [m.start() for m in GLUED.finditer(text)] + [len(text)]
+    result = text[:cuts[0]]
+    for start, end in zip(cuts, cuts[1:]):
+        part = text[start:end].lstrip(".").strip()
+        if not part or part in result:      # дослівний повтор уже сказаного
+            continue
+        if "?" in result:                   # запитання вже поставлено: решту відкидаємо
+            break
+        result += " " + part
+    return result.strip()
 
 
 def _retry_after(error: RateLimitError) -> float:
@@ -193,6 +201,11 @@ class ExaminerAgent:
                     if e.status_code in (400, 500, 502, 503) and model != list(self.models)[-1]:
                         continue   # напр. 400 tool_use_failed: модель зламала формат виклику
                     raise AgentError(f"Помилка Groq API (код {e.status_code}). Спробуйте ще раз.")
+                if LOG_PATH:   # журнал викликів для налагодження: яка модель що відповіла
+                    reply = response.choices[0].message
+                    with open(LOG_PATH, "a", encoding="utf-8") as f:
+                        f.write(json.dumps({"model": model, "content": reply.content, "tool_calls": [
+                            c.function.name for c in reply.tool_calls or []]}, ensure_ascii=False) + "\n")
                 usage = response.usage
                 self.usage.append({"model": model, "prompt_tokens": usage.prompt_tokens,
                                    "completion_tokens": usage.completion_tokens})
@@ -250,7 +263,7 @@ class ExaminerAgent:
             history = self.history + [message("system", feedback), call]
             exam.end_exam(email=email, score=score, history=history)
             self.history = history
-            events.append({"type": "assistant", "content": feedback, "final": True})
+            events.append({"type": "assistant", "content": feedback, "final": True, "score": score})
             return {"status": "saved", "score": score}
         raise ExamError(f"Невідомий інструмент {name}.")
 

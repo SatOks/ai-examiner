@@ -38,7 +38,7 @@ def show_event(event: dict, show_tools: bool) -> None:
             show_tool(event)
     elif event.get("final"):
         with st.container(border=True):
-            st.markdown("**Результат іспиту**")
+            st.markdown(f"**Результат іспиту: {event['score']:g} / 10**")
             st.markdown(md(event["content"]))
     else:
         st.markdown(md(event["content"]))

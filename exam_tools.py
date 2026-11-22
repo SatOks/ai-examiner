@@ -24,10 +24,10 @@ def message(role: str, content: str) -> dict:
     return {"role": role, "content": content, "datetime": now()}
 
 
-def normalize_name(name: str) -> list[str]:
-    """«Коваль  Олена» і «олена коваль» вважаємо одним ім'ям: порядок слів і регістр не важать."""
+def name_words(name: str) -> set[str]:
+    """Слова імені без регістру: «Коваль  Олена» і «олена коваль» дають ту саму множину."""
     name = name.lower().replace("’", "'").replace("ʼ", "'")
-    return sorted(re.findall(r"[\w']+", name))
+    return set(re.findall(r"[\w']+", name))
 
 
 class Exam:
@@ -50,11 +50,12 @@ class Exam:
         email = (email or "").strip().lower()
         student = next((s for s in STUDENTS if s["email"].lower() == email), None)
         if student is None:
-            raise ExamError(f"Студента з email {email or '(порожній)'} немає в списку. "
-                            "Попросіть студента перевірити email.")
-        if normalize_name(name or "") != normalize_name(student["name"]):
-            raise ExamError("Ім'я не збігається з іменем, записаним для цього email. "
-                            "Попросіть студента вказати ім'я та прізвище повністю.")
+            raise ExamError(f"Студента з email {email or '(порожній)'} немає в списку. Попросіть студента "
+                            "перевірити email і, коли він його напише, знову викличте start_exam.")
+        # Ім'я й прізвище з бази мають бути серед слів name: «Добрий день, Олена Коваль» теж підходить
+        if not name_words(student["name"]) <= name_words(name or ""):
+            raise ExamError("Ім'я не збігається з іменем, записаним для цього email. Попросіть студента "
+                            "написати ім'я та прізвище повністю і знову викличте start_exam.")
         self.student = student
         self.topics = self.rng.sample([t["title"] for t in TOPICS], k=self.rng.randint(2, 3))
         self.remaining = list(self.topics)
