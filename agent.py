@@ -146,6 +146,23 @@ class AgentError(Exception):
 class ExaminerAgent:
     """Один іспит = один агент. Зберігає повідомлення для моделі та історію у форматі методички."""
 
+    # Значення за замовчуванням на рівні класу: їх отримує й агент, перенесений зі старої версії коду
+    on_wait = None
+    topic_unasked = False
+    compact_level = 0
+
+    @classmethod
+    def upgrade(cls, old) -> "ExaminerAgent":
+        """Переносить стан іспиту з об'єкта старої версії класу. Streamlit перезавантажує модулі, коли
+        код оновлюється, а агент у st.session_state лишається екземпляром старого класу."""
+        fresh = cls.__new__(cls)
+        fresh.__dict__.update(vars(old))
+        if not isinstance(fresh.exam, Exam):
+            exam = Exam.__new__(Exam)
+            exam.__dict__.update(vars(fresh.exam))
+            fresh.exam = exam
+        return fresh
+
     def __init__(self, api_key: str, exam: Exam | None = None, models: dict[str, dict] | None = None):
         self.client = Groq(api_key=api_key.strip(), max_retries=0)
         self.on_wait = None   # колбек для інтерфейсу: on_wait(секунди), коли чекаємо на ліміт

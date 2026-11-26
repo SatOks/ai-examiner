@@ -2,6 +2,7 @@
 
 import json
 import os
+import traceback
 
 import streamlit as st
 from groq import Groq
@@ -62,6 +63,9 @@ with st.sidebar:
 
     st.header("Стан іспиту")
     agent: ExaminerAgent | None = st.session_state.get("agent")
+    if agent is not None and not isinstance(agent, ExaminerAgent):
+        # Код оновився посеред іспиту: переносимо стан у новий клас, щоб іспит продовжився
+        agent = st.session_state.agent = ExaminerAgent.upgrade(agent)
     exam = agent.exam if agent else None
     if not exam or not exam.student:
         st.caption("Іспит ще не розпочато.")
@@ -121,9 +125,13 @@ if prompt:
         try:
             with st.spinner("Екзаменатор думає…"):
                 events = agent.respond(prompt)
-        except AgentError as e:
+        except Exception as e:  # noqa: BLE001
             waiting.empty()
-            st.error(str(e))
+            if isinstance(e, AgentError) or type(e).__name__ == "AgentError":
+                st.error(str(e))
+            else:
+                traceback.print_exc()   # повний текст у журнал Streamlit Cloud, студенту – коротко
+                st.error("Сталася несподівана помилка. Надішліть відповідь ще раз або почніть новий іспит.")
             st.stop()
         waiting.empty()
         for event in events:

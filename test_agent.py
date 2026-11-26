@@ -273,3 +273,29 @@ def test_too_large_even_after_compaction(tmp_path):
     agent.client = NS(chat=NS(completions=NS(create=create)))
     with pytest.raises(AgentError, match="задовгою"):
         agent.respond("Демо Студент")
+
+
+def test_upgrade_agent_from_old_class(tmp_path):
+    """Після оновлення коду в st.session_state лежить агент старого класу без нових полів."""
+    agent = make_agent(tmp_path, [reply(None, call("start_exam", email="demo@lpnu.ua", name="Демо Студент")),
+                                  reply("Перше запитання?")])
+    agent.respond("Демо Студент, demo@lpnu.ua")
+
+    class OldExam:
+        pass
+
+    class OldAgent:
+        pass
+
+    old = OldAgent()
+    old.__dict__.update({k: v for k, v in vars(agent).items() if k != "compact_level"})
+    old_exam = OldExam()
+    old_exam.__dict__.update(vars(agent.exam))
+    old.exam = old_exam
+
+    fresh = ExaminerAgent.upgrade(old)
+    assert isinstance(fresh, ExaminerAgent) and isinstance(fresh.exam, Exam)
+    assert fresh.compact_level == 0
+    assert fresh.messages == agent.messages and fresh.exam.topics == agent.exam.topics
+    fresh.client = FakeModel([reply("Друге запитання?")])
+    assert fresh.respond("відповідь")[-1]["content"] == "Друге запитання?"
