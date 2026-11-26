@@ -18,7 +18,11 @@ MODELS = {
 }
 LOG_PATH = os.environ.get("EXAMINER_LOG")   # необов'язковий журнал відповідей моделей
 MAX_STEPS = 8            # максимум викликів моделі на одну репліку студента
-MAX_ANSWER_CHARS = 3000
+MAX_ANSWER_CHARS = 2000
+# Рівні стиснення історії, коли запит не влазить у ліміт Groq (HTTP 413): до скількох символів
+# обрізати старі репліки. 0 – без змін; 1–2 – пройдені теми; 3 – ще й поточна, крім останніх реплік.
+COMPACT_LIMITS = [None, 500, 200, 200]
+KEEP_RECENT = 4
 ADVANCING_TOOLS = {"get_next_topic", "end_exam"}   # інструменти, що ведуть іспит далі
 # gpt-oss на Groq інколи віддає два повідомлення, зшиті без пробілу: «…підходи?Опишіть, будь ласка…»
 GLUED = re.compile(r"(?<=[?!.…])\.*(?=[*«]*[А-ЯІЇЄҐA-Z])")
@@ -99,6 +103,34 @@ def clean_reply(text: str) -> str:
     return result.strip()
 
 
+def compact_messages(messages: list[dict], level: int) -> list[dict]:
+    """Копія розмови для запиту до моделі, стиснена до рівня level. Структура (порядок, ролі,
+    пари tool_calls ↔ tool) не змінюється, скорочується лише текст старих повідомлень:
+    з результатів get_next_topic пройдених тем прибираються key_points, довгі репліки обрізаються."""
+    if level <= 0:
+        return messages
+    current = 0   # початок поточної теми: останній результат get_next_topic з key_points
+    for i, m in enumerate(messages):
+        if m["role"] == "tool" and '"key_points"' in (m.get("content") or ""):
+            current = i
+    keep_from = len(messages) - KEEP_RECENT if level >= 3 else current
+    limit = COMPACT_LIMITS[min(level, len(COMPACT_LIMITS) - 1)]
+    out = []
+    for i, m in enumerate(messages):
+        if i < 2 or i >= keep_from:   # системний промпт, привітання і свіжа частина – повністю
+            out.append(m)
+            continue
+        content = m.get("content")
+        if m["role"] == "tool" and content and '"key_points"' in content:
+            data = json.loads(content)
+            data.pop("key_points", None)
+            m = {**m, "content": json.dumps(data, ensure_ascii=False)}
+        elif m["role"] in ("user", "assistant") and content and len(content) > limit:
+            m = {**m, "content": content[:limit] + " […скорочено]"}
+        out.append(m)
+    return out
+
+
 def _retry_after(error: RateLimitError) -> float:
     """Скільки секунд чекати за заголовком retry-after (з невеликим запасом)."""
     try:
@@ -125,6 +157,7 @@ class ExaminerAgent:
         self.history = [message("system", GREETING)]
         self.usage: list[dict] = []
         self.topic_unasked = False   # тему видано, але студент ще не бачив жодного запитання з неї
+        self.compact_level = 0       # наскільки стискати історію в запитах (росте після HTTP 413)
 
     def respond(self, text: str) -> list[dict]:
         """Обробляє репліку студента. Повертає події для інтерфейсу:
@@ -181,13 +214,14 @@ class ExaminerAgent:
     def _complete(self):
         """Один виклик моделі. При ліміті токенів пробує запасну модель, а якщо обмежені всі,
         чекає стільки, скільки просить Groq (retry-after), і пробує знову."""
-        waited = 0.0
+        waited, level = 0.0, self.compact_level
         while True:
-            retry_after, daily = None, True
+            retry_after, daily, too_large = None, True, False
+            messages = compact_messages(self.messages, level)
             for model in self.models:
                 try:
                     response = self.client.chat.completions.create(
-                        model=model, messages=self.messages, tools=TOOLS, tool_choice="auto",
+                        model=model, messages=messages, tools=TOOLS, tool_choice="auto",
                         temperature=0.3, include_reasoning=False, max_completion_tokens=2048,
                         **self.models[model])
                 except AuthenticationError:
@@ -200,6 +234,9 @@ class ExaminerAgent:
                 except APIConnectionError:
                     raise AgentError("Не вдалося з'єднатися з Groq. Спробуйте ще раз.")
                 except APIStatusError as e:
+                    if e.status_code == 413:   # запит більший за хвилинний ліміт моделі: треба стискати
+                        too_large = True
+                        continue
                     if e.status_code in (400, 500, 502, 503) and model != list(self.models)[-1]:
                         continue   # напр. 400 tool_use_failed: модель зламала формат виклику
                     raise AgentError(f"Помилка Groq API (код {e.status_code}). Спробуйте ще раз.")
@@ -208,10 +245,17 @@ class ExaminerAgent:
                     with open(LOG_PATH, "a", encoding="utf-8") as f:
                         f.write(json.dumps({"model": model, "content": reply.content, "tool_calls": [
                             c.function.name for c in reply.tool_calls or []]}, ensure_ascii=False) + "\n")
+                self.compact_level = level
                 usage = response.usage
                 self.usage.append({"model": model, "prompt_tokens": usage.prompt_tokens,
                                    "completion_tokens": usage.completion_tokens})
                 return response.choices[0].message
+            if too_large:
+                if level + 1 < len(COMPACT_LIMITS):
+                    level += 1   # стискаємо історію сильніше і пробуємо одразу
+                    continue
+                raise AgentError("Розмова стала задовгою для безкоштовного ліміту Groq. "
+                                 "Відповідайте коротше або почніть новий іспит.")
             if retry_after is None:
                 raise AgentError("Модель тимчасово недоступна. Спробуйте ще раз.")
             if retry_after > MAX_WAIT or waited + retry_after > MAX_WAIT:

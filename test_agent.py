@@ -207,3 +207,69 @@ def test_daily_limit_message(tmp_path, monkeypatch):
     with pytest.raises(AgentError, match="добовий ліміт"):
         agent.respond("Демо Студент")
     assert agent.messages[-1]["role"] == "assistant"   # репліку відкочено, можна надіслати ще раз
+
+
+def long_exam_messages():
+    """Розмова з двома темами: перша вже пройдена, друга поточна; відповіді довгі."""
+    topic = lambda t: json.dumps({"topic": t, "key_points": ["пункт"] * 5}, ensure_ascii=False)  # noqa: E731
+    msgs = [{"role": "system", "content": "S"}, {"role": "assistant", "content": "привіт"}]
+    for t in ("Тема 1", "Тема 2"):
+        msgs += [{"role": "assistant", "content": None, "tool_calls": [{"id": t, "type": "function",
+                  "function": {"name": "get_next_topic", "arguments": "{}"}}]},
+                 {"role": "tool", "tool_call_id": t, "content": topic(t)}]
+        for _ in range(3):
+            msgs += [{"role": "assistant", "content": "Запитання? " * 30}, {"role": "user", "content": "в" * 1500}]
+    return msgs
+
+
+def test_compact_messages_keeps_structure_and_current_topic():
+    from agent import compact_messages
+    msgs = long_exam_messages()
+    assert compact_messages(msgs, 0) is msgs
+    for level in (1, 2, 3):
+        small = compact_messages(msgs, level)
+        assert [m["role"] for m in small] == [m["role"] for m in msgs]
+        assert [m.get("tool_call_id") for m in small] == [m.get("tool_call_id") for m in msgs]
+        assert len(json.dumps(small, ensure_ascii=False)) < len(json.dumps(msgs, ensure_ascii=False))
+        assert "key_points" not in small[3]["content"] and "Тема 1" in small[3]["content"]
+        assert small[-1] == msgs[-1]
+    current = next(i for i, m in enumerate(msgs) if m["role"] == "tool" and "Тема 2" in m["content"])
+    assert compact_messages(msgs, 2)[current:] == msgs[current:]    # поточна тема повністю
+    assert compact_messages(msgs, 3)[current + 2] != msgs[current + 2]  # на рівні 3 і вона стискається
+    assert msgs[3]["content"].count("пункт") == 5                    # оригінал не змінено
+
+
+def test_too_large_request_is_compacted(tmp_path):
+    import httpx
+    from groq import APIStatusError
+
+    class TooLarge(FakeModel):
+        def create(self, **kwargs):
+            if len(json.dumps(kwargs["messages"], ensure_ascii=False)) > 9000:
+                response = httpx.Response(413, request=httpx.Request("POST", "https://api.groq.com"))
+                raise APIStatusError("Request too large (TPM)", response=response, body=None)
+            return super().create(**kwargs)
+
+    agent = make_agent(tmp_path, [])
+    agent.messages = long_exam_messages()
+    agent.client = TooLarge([reply("Наступне запитання?")])
+    events = agent.respond("коротка відповідь")
+    assert events == [{"type": "assistant", "content": "Наступне запитання?"}]
+    assert agent.compact_level >= 1
+    assert agent.messages[-2]["content"] == "коротка відповідь"
+    assert agent.messages[3]["content"].count("пункт") == 5   # повна історія лишилась у агента
+
+
+def test_too_large_even_after_compaction(tmp_path):
+    import httpx
+    from groq import APIStatusError
+    from agent import AgentError
+
+    def create(**kwargs):
+        response = httpx.Response(413, request=httpx.Request("POST", "https://api.groq.com"))
+        raise APIStatusError("Request too large (TPM)", response=response, body=None)
+
+    agent = make_agent(tmp_path, [])
+    agent.client = NS(chat=NS(completions=NS(create=create)))
+    with pytest.raises(AgentError, match="задовгою"):
+        agent.respond("Демо Студент")
